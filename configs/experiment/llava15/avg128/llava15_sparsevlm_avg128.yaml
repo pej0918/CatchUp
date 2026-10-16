@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /eval: pope
+  - /model: llava15_7b_hf
+  - _self_
+
+routing:
+  method: sparsevlm
+  action: physical_delete
+  retain_tokens: 128
+  use_version: "1_0"
+  drop_layers: [2, 6, 15]
+
+eval:
+  batch_size: 1
+  log_samples: true

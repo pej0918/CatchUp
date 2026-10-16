@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - /eval: pope
+  - /model: llava15_7b_hf_eager
+  - _self_
+
+routing:
+  method: nuwa
+  action: physical_delete
+
+  matain_token: 192
+  distance: 280
+  penalty_threshold_percentile: 0.55
+
+  # Official Nuwa avg192 schedule
+  stage1_tokens: 336
+  stage2_layer: 16
+  stage2_tokens: 48
+
+eval:
+  batch_size: 1
+  log_samples: true

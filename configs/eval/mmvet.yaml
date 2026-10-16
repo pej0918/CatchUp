@@ -1,0 +1,5 @@
+# MM-Vet — integrated multimodal reasoning benchmark.
+benchmarks:
+  - mmvet
+batch_size: 1
+log_samples: false

@@ -1,0 +1,5 @@
+# VQAv2 validation set — classic open-ended VQA.
+benchmarks:
+  - vqav2_val
+batch_size: 1
+log_samples: false

@@ -1,0 +1,34 @@
+# Generated output
+experiments/
+diagnostics/
+figures/
+submissions/
+outputs/
+wandb/
+logs/
+*.log
+
+# Python and environment
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Data, weights, external editable evaluator
+lmms-eval/
+checkpoints/
+datasets/
+hf_cache/
+*.safetensors
+*.pt
+*.pth
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/

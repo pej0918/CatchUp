@@ -1,0 +1,18 @@
+# @package _global_
+# CatchUp on LLaVA-1.5-7B (routing budget 128).
+defaults:
+  - /eval: pope
+  - /model: llava15_7b_hf
+  - _self_
+
+routing:
+  method: qver
+  action: compact_route
+  monotonic: false
+  drop_layers: [2, 7, 15, 23]
+  keep_ratios: [0.2655, 0.2655, 0.1328, 0.0664]
+
+eval:
+  batch_size: 1
+  log_samples: true
+

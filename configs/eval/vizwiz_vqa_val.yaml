@@ -1,0 +1,5 @@
+# VizWiz VQA validation set — real-world noisy VQA.
+benchmarks:
+  - vizwiz_vqa_val
+batch_size: 1
+log_samples: false

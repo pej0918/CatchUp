@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# CatchUp final paper setting: Section 4.3, Eqs. (7)-(12).
+# Keep qver as a historical code identifier; paper method is CatchUp.
+# No auxiliary query bonus and no post-correction norm rescaling.
+export REROUTE_ORACLE_MODE=none
+export REROUTE_ALIGNMENT_DIAG=0
+export REROUTE_ROUTING_AGREEMENT_DIAG=0
+export REROUTE_CORRECTION_MODE=qver
+export REROUTE_CORRECTION_ANCHOR_MODE=semantic_spatial
+export REROUTE_CORRECTION_TOPM=8
+export REROUTE_CORRECTION_SPATIAL_LAMBDA=0.15
+export REROUTE_CORRECTION_GAMMA_MAX=0.80
+export REROUTE_CORRECTION_MIN_LAYER_GAP=1
+export REROUTE_CORRECTION_TAU_L=0.07
+export REROUTE_CORRECTION_TAU_G=0.07
+export REROUTE_CORRECTION_QUERY_ETA=0.0
+export REROUTE_CORRECTION_QUERY_NORM=minmax
+export REROUTE_CORRECTION_NORM_PRESERVE=0
+export REROUTE_CORRECTION_NORM_TARGET=none
+export REROUTE_CORRECTION_SNAPSHOT_POLICY=live
+export REROUTE_CORRECTION_SNAPSHOT_DEBUG=0
