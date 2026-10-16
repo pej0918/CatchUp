@@ -56,3 +56,16 @@ bash scripts/run_paper_benchmarks.sh --backbone llava15 --gpu 0
 ~~~
 
 The scripts write results to `experiments/paper/` (git-ignored). For locally downloaded model weights, pass `--model-path /path/to/checkpoint` to `run_catchup.sh`. Individual task configs can be selected by name under `configs/eval/` without the `.yaml` suffix.
+
+## Citation
+
+If you find this work useful, please consider citing:
+
+```bibtex
+@inproceedings{park2027catchup,
+  title={CatchUp: Depth-Aware Re-Admission of Visual Tokens for Efficient Large Vision-Language Models},
+  author={Eunju Park and Uiwon Hwang},
+  booktitle={Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+  year={2027}
+}
+```
