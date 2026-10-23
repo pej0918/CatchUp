@@ -1,24 +1,17 @@
 """Token routing scorers for visual token selection.
 
-Two routers exposed by the release:
-- FastVRouter: single-shot scoring at one early layer
-  (last-position attention over the visual range).
-- PDropRouter (PyramidDrop): multi-stage scoring at several drop layers
-  with optional monotonic / non-monotonic accumulation.
+QVERouter implements reversible visual token selection.
 
-All routers score over visual tokens only; text / system tokens are
+The router scores over visual tokens only; text / system tokens are
 always kept active.
 """
 
 from __future__ import annotations
 
-import math
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 
@@ -27,7 +20,7 @@ def _aggregate_query_attention(
     vis_start: int,
     vis_end: int,
 ) -> Tensor:
-    """Last-text-token attention over the visual range (FastV / PDrop scoring)."""
+    """Last-text-token attention over the visual region."""
     return attn_avg[:, -1, vis_start:vis_end].float()
 
 
@@ -90,107 +83,18 @@ class TokenRouter(ABC):
         ...
 
 
-class FastVRouter(TokenRouter):
-    """FastV-style scoring: average attention from the last token to visual
-    tokens, computed once at a single early layer.
+class QVERouter(TokenRouter):
+    """Query-guided reversible visual-token routing for CatchUp.
 
-    Reference: Chen et al., 2024. "An Image is Worth 1/2 Tokens After Layer 2"
-    (ECCV 2024).
-
-    FastV scores at layer ``scoring_layer`` using the attention weights from
-    that layer itself.  The *last sequence token*'s attention over the visual
-    region is averaged across heads to produce per-token importance.
-    """
-
-    def __init__(
-        self,
-        scoring_layer: int = 2,
-        keep_ratio: float = 0.5,
-    ) -> None:
-        self.scoring_layer = scoring_layer
-        self.keep_ratio = keep_ratio
-        # Once scored, the mask is fixed for all subsequent layers.
-        self._cached_decision: Optional[RoutingDecision] = None
-
-    # ------------------------------------------------------------------
-    def should_route(self, layer_idx: int) -> bool:
-        return layer_idx >= self.scoring_layer
-
-    def is_decision_layer(self, layer_idx: int) -> bool:
-        return layer_idx == self.scoring_layer
-
-    # ------------------------------------------------------------------
-    def compute_scores(
-        self,
-        layer_idx: int,
-        attn_weights: Tensor,
-        hidden_states: Tensor,
-        visual_token_range: tuple[int, int],
-        **kwargs,
-    ) -> RoutingDecision:
-        # FastV computes scores once and reuses the same mask afterwards.
-        if self._cached_decision is not None:
-            return self._cached_decision
-
-        vis_start, vis_end = visual_token_range
-        num_visual = vis_end - vis_start
-        k = max(1, int(num_visual * self.keep_ratio))
-
-        # attn_weights: (batch, heads, seq, seq) → mean across heads.
-        attn_avg = attn_weights.mean(dim=1)
-
-        scores = _aggregate_query_attention(
-            attn_avg,
-            vis_start=vis_start,
-            vis_end=vis_end,
-        )
-        topk = scores.topk(k, dim=-1)
-        selected_indices = topk.indices.sort(dim=-1).values  # (batch, K)
-
-        # Build boolean mask
-        mask = torch.zeros_like(scores, dtype=torch.bool)
-        mask.scatter_(1, selected_indices, True)
-
-        self._cached_decision = RoutingDecision(
-            selected_mask=mask,
-            scores=scores,
-            selected_indices=selected_indices,
-        )
-        return self._cached_decision
-
-    # ------------------------------------------------------------------
-    def reset(self) -> None:
-        """Clear cached decision (call between samples)."""
-        self._cached_decision = None
-
-
-class PDropRouter(TokenRouter):
-    """PyramidDrop-style multi-layer scoring router.
-
-    Reference: PyramidDrop (CVPR 2025). At each drop layer, full-attention
-    weights are captured by ``patching._capture_attention_weights`` and
-    consumed here via last-position scoring over the visual range.
-
-    Unlike FastV, PDrop re-scores at each drop layer and progressively
-    reduces the number of visual tokens.
-
-    Args:
-        drop_layers: layer indices where routing decisions are made.
-            Example: [7, 15, 23] for a 32-layer model.
-        keep_ratios: cumulative keep ratio at each drop layer.
-            Example: [0.75, 0.5, 0.25] — after layer 7 keep 75%, after
-            layer 15 keep 50% of original, etc.
-        monotonic: if True (default), tokens dropped at earlier stages
-            can never be re-selected. Required for physical_delete (the
-            tokens are gone). Set to False for compact_route to allow
-            previously-deferred tokens to be re-selected at later stages.
+    Scores all original visual tokens at each routing stage, then selects
+    the current Top-K. Unselected tokens remain eligible for re-admission.
     """
 
     def __init__(
         self,
         drop_layers: list[int] | None = None,
         keep_ratios: list[float] | None = None,
-        monotonic: bool = True,
+        monotonic: bool = False,
     ) -> None:
         # Defaults for a 32-layer model (LLaMA-2-7B style)
         self.drop_layers = drop_layers or [7, 15, 23]
@@ -296,132 +200,3 @@ class PDropRouter(TokenRouter):
         """Clear all cached decisions (call between samples)."""
         self._stage_decisions.clear()
         self._original_num_visual = None
-
-class QVERouter(PDropRouter):
-    """Query-guided dynamic visual evidence router.
-
-    This is a thin, paper-facing wrapper around non-monotonic PDrop scoring:
-    each decision layer re-scores visual tokens from query/text attention and
-    selects the current Top-K from all visual tokens.  Tokens not selected at a
-    layer are deferred, not permanently removed, and can be re-activated at a
-    later routing layer.
-    """
-
-    def __init__(
-        self,
-        drop_layers: list[int] | None = None,
-        keep_ratios: list[float] | None = None,
-        monotonic: bool = False,
-    ) -> None:
-        super().__init__(
-            drop_layers=drop_layers,
-            keep_ratios=keep_ratios,
-            monotonic=monotonic,
-        )
-
-
-class SparseVLMRouter(TokenRouter):
-    """
-    Official SparseVLM port.
-    Uses layer-wise sparse token schedules from SparseVLM score.py.
-    """
-
-    def __init__(
-        self,
-        retain_tokens: int = 192,
-        use_version: str = "1_0",
-        drop_layers: list[int] | None = None,
-    ) -> None:
-        self.retain_tokens = int(retain_tokens)
-        self.use_version = str(use_version)
-        self.drop_layers = drop_layers or [2, 6, 15]
-
-        if self.use_version == "2_0":
-            schedule_dict = {
-                192: [300, 200, 118],
-                128: [238, 108, 60],
-                96:  [246, 54, 28],
-                64:  [66, 34, 20],
-            }
-        else:
-            schedule_dict = {
-                192: [300, 200, 110],
-                128: [303, 110, 36],
-                96:  [238, 48, 26],
-                64:  [66, 30, 17],
-            }
-
-        if self.retain_tokens not in schedule_dict:
-            raise ValueError(
-                f"Unsupported SparseVLM retain_tokens={self.retain_tokens}. "
-                f"Supported: {list(schedule_dict.keys())}"
-            )
-
-        self.keep_tokens = schedule_dict[self.retain_tokens]
-        assert len(self.drop_layers) == len(self.keep_tokens)
-
-        self._stage_decisions: dict[int, RoutingDecision] = {}
-
-    def should_route(self, layer_idx: int) -> bool:
-        return layer_idx in self.drop_layers or any(layer_idx > dl for dl in self.drop_layers)
-
-    def is_decision_layer(self, layer_idx: int) -> bool:
-        return layer_idx in self.drop_layers
-
-    def _current_stage(self, layer_idx: int) -> int | None:
-        stage = None
-        for i, dl in enumerate(self.drop_layers):
-            if layer_idx >= dl:
-                stage = i
-        return stage
-
-    def compute_scores(
-        self,
-        layer_idx: int,
-        attn_weights: Tensor,
-        hidden_states: Tensor,
-        visual_token_range: tuple[int, int],
-        **kwargs,
-    ) -> RoutingDecision:
-        stage = self._current_stage(layer_idx)
-
-        vis_start, vis_end = visual_token_range
-        num_visual = vis_end - vis_start
-        batch = hidden_states.shape[0]
-
-        if stage is None:
-            return RoutingDecision(
-                selected_mask=torch.ones(batch, num_visual, dtype=torch.bool, device=hidden_states.device),
-                scores=torch.ones(batch, num_visual, device=hidden_states.device),
-                selected_indices=torch.arange(num_visual, device=hidden_states.device).unsqueeze(0).expand(batch, -1),
-            )
-
-        if stage in self._stage_decisions:
-            return self._stage_decisions[stage]
-
-        k = min(int(self.keep_tokens[stage]), max(1, num_visual - 1))
-        k = max(1, k)
-
-        attn_avg = attn_weights.mean(dim=1)
-        scores = _aggregate_query_attention(
-            attn_avg,
-            vis_start=vis_start,
-            vis_end=vis_end,
-        )
-
-        topk = scores.topk(k, dim=-1)
-        selected_indices = topk.indices.sort(dim=-1).values
-
-        mask = torch.zeros_like(scores, dtype=torch.bool)
-        mask.scatter_(1, selected_indices, True)
-
-        decision = RoutingDecision(
-            selected_mask=mask,
-            scores=scores,
-            selected_indices=selected_indices,
-        )
-        self._stage_decisions[stage] = decision
-        return decision
-
-    def reset(self) -> None:
-        self._stage_decisions.clear()

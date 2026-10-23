@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Runtime micro-benchmark for a single release config.
+"""Runtime microbenchmark on the three-image bundled cohort.
 
-Reads the bundled cohort at `bench_data/`, runs n_passes timed
-generations per sample, writes per-sample timings + model responses +
-aggregate stats to --out as JSON.
-
-Usage:
-  python scripts/bench_runtime.py \
-      --config-name experiment/llava15/avg192/llava15_ours_vs_fastv_avg192 \
-      --n-passes 5 --n-warmup-passes 2 --n-decode-tokens 64 \
-      --out experiments/runtime/llava15_ours_vs_fastv_avg192.json
+Run via: bash scripts/run_efficiency.sh --mode runtime --budget 64 --gpu 0
+Direct entrypoint: python profiler/bench_runtime.py --config-name
+experiment/llava15/avg64/llava15_qver_avg64 --out experiments/runtime/catchup_avg64.json
 """
 from __future__ import annotations
 
@@ -52,7 +46,7 @@ def _load_bundled_cohort() -> tuple[Path, list[dict]]:
 def _build_model_and_apply_routing(cfg_path: Path):
     from omegaconf import OmegaConf
     from transformers import AutoProcessor
-    from models.router import FastVRouter, PDropRouter, QVERouter, SparseVLMRouter
+    from models.router import QVERouter
     from models.dispatcher import TokenDispatcher
     from models.patching import patch_model_for_routing
 
@@ -66,27 +60,17 @@ def _build_model_and_apply_routing(cfg_path: Path):
     model_cfg = OmegaConf.load(_RELEASE_ROOT / "configs" / "model" / f"{model_name}.yaml")
 
     pretrained = model_cfg.pretrained
-    lmms_type = model_cfg.get("lmms_model_type", "llava_hf")
-    if lmms_type == "llava_hf":
-        from transformers import LlavaForConditionalGeneration as ModelCls
-        model_family = "llava"
-    elif lmms_type == "qwen2_5_vl":
-        from transformers import Qwen2_5_VLForConditionalGeneration as ModelCls
-        model_family = "qwen25vl"
-    else:
-        raise ValueError(f"Unknown lmms_model_type: {lmms_type}")
-
-    dtype = torch.float16 if model_family == "llava" else torch.bfloat16
-    print(f"[bench] loading {pretrained} (dtype={dtype}, family={model_family}) ...", flush=True)
+    if model_cfg.get("lmms_model_type", "llava_hf") != "llava_hf":
+        raise ValueError("Only LLaVA-1.5 is supported.")
+    from transformers import LlavaForConditionalGeneration as ModelCls
+    model_family = "llava"
+    dtype = torch.float16
+    print(f"[CatchUp] loading {pretrained} (dtype={dtype})", flush=True)
     load_kwargs = dict(
         torch_dtype=dtype,
         attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
     )
-    if model_family == "llava":
-        model = ModelCls.from_pretrained(pretrained, **load_kwargs).to("cuda").eval()
-    else:
-        load_kwargs["device_map"] = "auto"
-        model = ModelCls.from_pretrained(pretrained, **load_kwargs).eval()
+    model = ModelCls.from_pretrained(pretrained, **load_kwargs).to("cuda").eval()
 
     proc_kwargs = {}
     if model_cfg.get("max_pixels"):
@@ -95,100 +79,19 @@ def _build_model_and_apply_routing(cfg_path: Path):
 
     r_cfg = cfg.routing
     if r_cfg.method == "none":
-        print("[bench] no routing — vanilla baseline", flush=True)
-    elif r_cfg.method == "fastv":
-        router = FastVRouter(scoring_layer=r_cfg.scoring_layer, keep_ratio=r_cfg.keep_ratio)
-        patch_model_for_routing(model, router, TokenDispatcher(),
-                                action=r_cfg.action, model_family=model_family)
-        print(f"[bench] FastV K={r_cfg.scoring_layer} keep={r_cfg.keep_ratio} action={r_cfg.action}", flush=True)
-    elif r_cfg.method == "pdrop":
-        router = PDropRouter(
-            drop_layers=list(r_cfg.drop_layers),
-            keep_ratios=list(r_cfg.keep_ratios),
-            monotonic=r_cfg.get("monotonic", False),
-        )
-        patch_model_for_routing(model, router, TokenDispatcher(),
-                                action=r_cfg.action, model_family=model_family)
-        print(f"[bench] PDrop drops={list(r_cfg.drop_layers)} keeps={list(r_cfg.keep_ratios)} action={r_cfg.action}", flush=True)
-
-    elif r_cfg.method in ("qver", "query_dynamic"):
+        print("[bench] dense LLaVA baseline", flush=True)
+    elif r_cfg.method == "qver":
         router = QVERouter(
             drop_layers=list(r_cfg.drop_layers),
             keep_ratios=list(r_cfg.keep_ratios),
             monotonic=r_cfg.get("monotonic", False),
         )
         patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
+            model, router, TokenDispatcher(), action=r_cfg.action,
             model_family=model_family,
-        )
-        print(
-            f"[bench] Q-VER "
-            f"drops={list(r_cfg.drop_layers)} "
-            f"keeps={list(r_cfg.keep_ratios)} "
-            f"monotonic={r_cfg.get('monotonic', False)} "
-            f"action={r_cfg.action}",
-            flush=True,
-        )
-
-    elif r_cfg.method == "sparsevlm":
-        router = SparseVLMRouter(
-            retain_tokens=int(r_cfg.get("retain_tokens", 192)),
-            use_version=str(r_cfg.get("use_version", "1_0")),
-            drop_layers=list(r_cfg.get("drop_layers", [2, 6, 15])),
-        )
-        patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
-            model_family=model_family,
-        )
-        print(
-            f"[bench] SparseVLM "
-            f"retain_tokens={r_cfg.get('retain_tokens', 192)} "
-            f"use_version={r_cfg.get('use_version', '1_0')} "
-            f"drops={list(r_cfg.get('drop_layers', [2, 6, 15]))} "
-            f"action={r_cfg.action}",
-            flush=True,
-        )
-
-    elif r_cfg.method == "nuwa":
-        from models.nuwa_hf import NuwaRouter
-
-        router = NuwaRouter(
-            matain_token=int(r_cfg.get("matain_token", 192)),
-            distance=int(r_cfg.get("distance", 280)),
-            penalty_threshold_percentile=float(
-                r_cfg.get("penalty_threshold_percentile", 0.55)
-            ),
-            stage1_tokens=int(r_cfg.get("stage1_tokens", 336)),
-            stage2_layer=int(r_cfg.get("stage2_layer", 16)),
-            stage2_tokens=int(r_cfg.get("stage2_tokens", 48)),
-        )
-
-        patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
-            model_family=model_family,
-        )
-
-        print(
-            f"[bench] Nuwa "
-            f"matain_token={r_cfg.get('matain_token', 192)} "
-            f"stage1={r_cfg.get('stage1_tokens', 336)} "
-            f"stage2_layer={r_cfg.get('stage2_layer', 16)} "
-            f"stage2={r_cfg.get('stage2_tokens', 48)} "
-            f"distance={r_cfg.get('distance', 280)} "
-            f"action={r_cfg.action}",
-            flush=True,
         )
     else:
-        raise ValueError(f"Unknown routing.method: {r_cfg.method}")
+        raise ValueError(f"Unsupported routing method: {r_cfg.method}")
 
     return model, processor, model_family
 
@@ -249,7 +152,7 @@ def main() -> int:
     ap.add_argument("--config-name", required=True,
                     help="release experiment config path, e.g. experiment/llava15/avg192/...")
     ap.add_argument("--n-passes", type=int, default=3,
-                    help="number of timed passes through the 10-sample cohort (default 3 → 30 timings)")
+                    help="number of timed passes through the three-image cohort")
     ap.add_argument("--n-warmup-passes", type=int, default=1,
                     help="warmup passes through cohort (not timed, primes cuDNN/caches)")
     ap.add_argument("--n-decode-tokens", type=int, default=64,

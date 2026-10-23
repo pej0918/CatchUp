@@ -1,65 +1,75 @@
-# CatchUp: Depth-Aware Re-Admission of Visual Tokens for Efficient Large Vision-Language Models
+<div align="center">
 
-**CatchUp** is a training-free framework for efficient large vision-language models that combines reversible visual-token routing with **Local Transition Correction (LTC)** to correct stale token representations upon re-admission.
+# 🪃 CatchUp
 
-## Layout
+<h3>Depth-Aware Re-Admission of Visual Tokens<br>for Efficient Large Vision-Language Models</h3>
 
-~~~text
-models/               reversible routing, deferred-token dispatch, LTC, baseline routers
-configs/experiment/   LLaVA / Qwen, routing budgets 64/128/192
-configs/eval/         POPE, grounding, and MLLM evaluation definitions
-configs/model/        model identifiers and model-specific settings
-scripts/run_eval.py   Hydra + lmms-eval entry point
-scripts/run_catchup.sh             single benchmark entry point
-scripts/run_paper_benchmarks.sh    six benchmark groups / three budgets
-scripts/catchup_env.sh             canonical release LTC settings
-scripts/run_profile.sh             prefill TFLOPs / memory
-scripts/run_runtime_bench.sh       runtime / latency
-profiler/             efficiency measurement implementations
-bench_data/           fixed profiling cohort (not accuracy benchmarks)
-lmms_eval_patches/    RefCOCO evaluation compatibility patches
-~~~
+[![arXiv](https://img.shields.io/badge/arXiv-2610.23324-b31b1b.svg)](https://arxiv.org/abs/2610.23324)
+[![WACV](https://img.shields.io/badge/WACV-2027-1f6feb.svg)](https://wacv.thecvf.com)
 
-## Installation
+<!-- Add when a real project page and a LICENSE file are available:
+[![Project Page](https://img.shields.io/badge/Project-Page-2ea44f.svg)](YOUR_PROJECT_PAGE_LINK)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+-->
 
-The original code targets Python 3.10 and the dependencies in `requirements.txt`. Use CUDA-compatible PyTorch / torchvision wheels for your machine before installing the remaining dependencies.
+</div>
 
-~~~bash
-conda create -n catchup python=3.10 -y
-conda activate catchup
-# Install torch and torchvision appropriate for your CUDA installation.
-pip install -r requirements.txt
+> **CatchUp** is a training-free framework for efficient LVLM inference that combines **reversible visual-token routing** with **Local Transition Correction (LTC)** to improve the representation readiness of re-admitted tokens.
+
+## 🗂️ Layout
+
+```text
+models/                    Q-VER routing and LTC
+configs/                   Model and benchmark configurations
+scripts/                   Evaluation and efficiency scripts
+profiler/                  Runtime, FLOPs, and memory profiling
+lmms_eval_patches/         RefCOCO evaluation patches
+bench_data/                Efficiency benchmark samples
+```
+
+## 🛠️ Installation
+
+Run from the CatchUp repository root. The PyTorch command below is an example for **CUDA 12.8**; choose a compatible build from the [official PyTorch installation guide](https://pytorch.org/get-started/locally/) for other CUDA environments.
+
+```bash
+conda create -n reroute python=3.10 -y
+conda activate reroute
+
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
 git clone --branch v0.7.1 --depth 1 https://github.com/EvolvingLMMs-Lab/lmms-eval.git
 pip install -e ./lmms-eval
+pip install -r requirements.txt
 bash lmms_eval_patches/apply.sh
-~~~
 
-A CUDA GPU is required to evaluate the 7B backbones. MM-Vet grading may require an `OPENAI_API_KEY`, depending on the evaluator.
+python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print('GPU:', torch.cuda.get_device_name(0))"
+```
 
-## Quick start
+## 🚀 Quick Start
 
-~~~bash
-# CatchUp on LLaVA-1.5-7B, budget 64, POPE.
-bash scripts/run_catchup.sh --backbone llava15 --budget 64 --eval pope --gpu 0
+**Evaluation**
 
-# All RefCOCO/+/g grounding splits and POPE.
-bash scripts/run_catchup.sh --backbone llava15 --budget 128 --eval paper_main --gpu 0
+```bash
+# Smoke test (2 samples per task)
+bash scripts/run_catchup.sh --budget 64 --task 'pope,refcoco+_val' --gpu 0 --limit 2
 
-# Quick smoke test.
-bash scripts/run_catchup.sh --backbone llava15 --budget 64 --eval pope --limit 10
+# POPE and RefCOCO+ Val (K=192)
+bash scripts/run_catchup.sh --budget 192 --task 'pope,refcoco+_val' --gpu 0
 
-# Second backbone.
-bash scripts/run_catchup.sh --backbone qwen25vl --budget 64 --eval pope --gpu 0
+# All RefCOCO / RefCOCO+ / RefCOCOg splits (K=64)
+bash scripts/run_catchup.sh --budget 64 --task grounding --gpu 0
+```
 
-# Sequentially run paper benchmark groups at all three budgets.
-bash scripts/run_paper_benchmarks.sh --backbone llava15 --gpu 0
-~~~
+**Efficiency**
 
-The scripts write results to `experiments/paper/` (git-ignored). For locally downloaded model weights, pass `--model-path /path/to/checkpoint` to `run_catchup.sh`. Individual task configs can be selected by name under `configs/eval/` without the `.yaml` suffix.
+```bash
+bash scripts/run_efficiency.sh --mode runtime --budget 64 --gpu 0 --compare catchup
+bash scripts/run_efficiency.sh --mode profile --budget 64 --gpu 0 --compare catchup
+```
 
-## Citation
+Available budget profiles: `64`, `128`, and `192`. TFLOPs profiling additionally requires DeepSpeed (see `requirements.txt`).
 
-If you find this work useful, please consider citing:
+## 📝 Citation
 
 ```bibtex
 @inproceedings{park2027catchup,

@@ -1,8 +1,0 @@
-# Qwen2.5-VL-7B-Instruct reference model.
-# Override model.pretrained if a local checkpoint is used.
-# max_pixels caps visual tokens near the iso-576 visual-token reference.
-pretrained: Qwen/Qwen2.5-VL-7B-Instruct
-lmms_model_type: qwen2_5_vl
-attn_implementation: sdpa
-num_layers: 28
-max_pixels: 451584

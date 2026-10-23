@@ -1,5 +1,5 @@
 # @package _global_
-# CatchUp on LLaVA-1.5-7B (routing budget 128).
+# LLaVA-1.5-7B + Q-VER reversible routing @ avg_T = 128.
 defaults:
   - /eval: pope
   - /model: llava15_7b_hf

@@ -1,14 +1,8 @@
-"""Run evaluation with visual token routing.
+"""Run LLaVA-1.5-7B evaluation with CatchUp (Q-VER + LTC).
 
-Usage:
-    conda run -n vlm_routing_4070ti python scripts/run_eval.py \
-        model=llava_7b routing=fastv routing.action=residual_skip
-
-This script:
-1. Loads the VLM via lmms-eval's model class
-2. Patches it with our routing mechanism
-3. Runs lmms-eval benchmarks
-4. Logs results to wandb and local results file
+Loads the pretrained model via lmms-eval, optionally patches the decoder
+for routing, evaluates the requested benchmark, and writes JSON metrics
+and per-sample outputs under the Hydra run directory.
 """
 
 from __future__ import annotations
@@ -30,7 +24,7 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from models.router import FastVRouter, PDropRouter, QVERouter, SparseVLMRouter
+from models.router import QVERouter
 from models.dispatcher import TokenDispatcher
 from models.patching import patch_model_for_routing, get_visual_token_finder
 
@@ -39,66 +33,16 @@ logger = logging.getLogger(__name__)
 
 
 def build_router(cfg: DictConfig):
-    """Construct a router from config. Release supports FastV and PDrop."""
-    if cfg.routing.method == "fastv":
-        keep_ratio = (cfg.routing.keep_ratios[0]
-                      if "keep_ratios" in cfg.routing
-                      else cfg.routing.keep_ratio)
-        return FastVRouter(
-            scoring_layer=cfg.routing.scoring_layer,
-            keep_ratio=keep_ratio,
-        )
-    elif cfg.routing.method == "pdrop":
-        return PDropRouter(
-            drop_layers=list(cfg.routing.drop_layers),
-            keep_ratios=list(cfg.routing.keep_ratios),
-            monotonic=cfg.routing.get("monotonic", True),
-        )
-    elif cfg.routing.method in ("qver", "query_dynamic"):
-        return QVERouter(
-            drop_layers=list(cfg.routing.drop_layers),
-            keep_ratios=list(cfg.routing.keep_ratios),
-            monotonic=cfg.routing.get("monotonic", False),
-        )
-    
-    elif cfg.routing.method == "sparsevlm":
-        return SparseVLMRouter(
-            retain_tokens=int(cfg.routing.get("retain_tokens", 192)),
-            use_version=str(cfg.routing.get("use_version", "1_0")),
-            drop_layers=list(cfg.routing.get("drop_layers", [2, 6, 15])),
-        )
-    elif cfg.routing.method == "nuwa":
-        from models.nuwa_hf import NuwaRouter
-        return NuwaRouter(
-            matain_token=int(cfg.routing.get("matain_token", 192)),
-            distance=int(cfg.routing.get("distance", 280)),
-            penalty_threshold_percentile=float(
-                cfg.routing.get("penalty_threshold_percentile", 0.55)
-            ),
-            stage1_tokens=int(cfg.routing.get("stage1_tokens", 336)),
-            stage2_layer=int(cfg.routing.get("stage2_layer", 16)),
-            stage2_tokens=int(cfg.routing.get("stage2_tokens", 48)),
-        )
-    elif cfg.routing.method == "none":
+    """Create CatchUp routing, or skip routing for dense inference."""
+    if cfg.routing.method == "none":
         return None
-    else:
-        raise ValueError(
-            f"Unknown routing method: {cfg.routing.method}. "
-            f"Release supports: fastv, pdrop, qver, sparsevlm, none."
-        )
-
-
-def get_model_family(model_name: str) -> str:
-    """Determine model family from model name."""
-    name = model_name.lower()
-    if "llava" in name:
-        return "llava"
-    elif "qwen3-vl" in name or "qwen3_vl" in name:
-        return "qwen3vl"
-    elif "qwen" in name:
-        return "qwen25vl"
-    else:
-        raise ValueError(f"Unknown model family for: {model_name}")
+    if cfg.routing.method != "qver":
+        raise ValueError(f"Unsupported routing method: {cfg.routing.method}")
+    return QVERouter(
+        drop_layers=list(cfg.routing.drop_layers),
+        keep_ratios=list(cfg.routing.keep_ratios),
+        monotonic=cfg.routing.get("monotonic", False),
+    )
 
 
 def run_lmms_eval(cfg: DictConfig) -> dict:
@@ -110,8 +54,10 @@ def run_lmms_eval(cfg: DictConfig) -> dict:
     from lmms_eval.models import get_model
 
     model_name = cfg.model.pretrained
-    model_family = get_model_family(model_name)
-    lmms_model_type = cfg.model.lmms_model_type  # "llava_hf" or "qwen2_5_vl"
+    model_family = "llava"
+    lmms_model_type = cfg.model.lmms_model_type
+    if lmms_model_type != "llava_hf":
+        raise ValueError("This release supports only LLaVA-1.5.")
 
     logger.info(f"Loading model: {model_name} (type: {lmms_model_type})")
 
@@ -133,127 +79,24 @@ def run_lmms_eval(cfg: DictConfig) -> dict:
         {"batch_size": cfg.eval.batch_size},
     )
 
-    # Patch the model with routing
-    if cfg.routing.method == "nuwa" and model_family == "qwen25vl":
-        # --------------------------------------------------------------
-        # Qwen2.5-VL Nüwa
-        #
-        # Keep the same HF Qwen2.5-VL model/environment as the other
-        # methods. Nüwa Stage-1 + Qwen-specific Stage-2 scoring are
-        # provided by our v5.4-compatible port.
-        #
-        # Project choice: Stage-2 routing/scoring boundary = L16.
-        # --------------------------------------------------------------
-        from models.nuwa_qwen_v54 import patch_qwen25vl_nuwa
-
-        logger.info(
-            "Patching Qwen2.5-VL with Nüwa: "
-            f"stage1_keep_ratio={cfg.routing.stage1_keep_ratio}, "
-            f"stage2_keep_ratio={cfg.routing.stage2_keep_ratio}, "
-            f"top_n={cfg.routing.get('top_n_per_region', 3)}, "
-            f"stage2_layer={cfg.routing.get('stage2_layer', 16)}, "
-            f"penalty={cfg.routing.get('penalty_threshold_percentile', 0.1)}"
+    router = build_router(cfg)
+    if router is not None:
+        logger.info(f"Patching LLaVA with CatchUp: {cfg.routing.action}")
+        ctx = patch_model_for_routing(
+            lm._model, router=router, dispatcher=TokenDispatcher(),
+            action=cfg.routing.action, model_family="llava",
         )
-
-        ctx = patch_qwen25vl_nuwa(
-            lm._model,
-            stage1_keep_ratio=float(cfg.routing.stage1_keep_ratio),
-            stage2_keep_ratio=float(cfg.routing.stage2_keep_ratio),
-            top_n_per_region=int(
-                cfg.routing.get("top_n_per_region", 3)
-            ),
-            stage2_layer=int(
-                cfg.routing.get("stage2_layer", 16)
-            ),
-            penalty_threshold_percentile=float(
-                cfg.routing.get("penalty_threshold_percentile", 0.1)
-            ),
-        )
-
-        # Store context on the lmms model wrapper for access during generation.
         lm._routing_ctx = ctx
-
     else:
-        # --------------------------------------------------------------
-        # Existing routing path.
-        #
-        # This includes the current LLaVA Nüwa implementation unchanged.
-        # --------------------------------------------------------------
-        router = build_router(cfg)
+        logger.info("No routing: dense LLaVA baseline")
 
-        if router is not None:
-            dispatcher = TokenDispatcher()
-            action = cfg.routing.action
-
-            logger.info(
-                f"Patching model with routing: "
-                f"method={cfg.routing.method}, action={action}"
-            )
-
-            ctx = patch_model_for_routing(
-                lm._model,
-                router=router,
-                dispatcher=dispatcher,
-                action=action,
-                model_family=model_family,
-            )
-
-            # Store context on the lmms model wrapper for access during generation
-            lm._routing_ctx = ctx
-        else:
-            logger.info("No routing — running baseline evaluation")
-
-    # Per-model-family RefCOCO evaluation presets.
-    # bbox_format and prompt_style are paired — each family is SFT'd on a
-    # specific (prompt distribution, output coord format) combo, and mixing
-    # them across families silently produces 0% ACC (Gate-0.4 lesson). Keep
-    # them in ONE dict so any new family adds both atomically or not at all.
-    #
-    # bbox format:
-    #   "normalized" = already [0,1]       (LLaVA-1.5 SFT target)
-    #   "pixel"      = divide by image dims (Qwen2.5-VL smart_resize pixels)
-    #   "scale_1000" = divide by 1000      (Qwen3-VL normalized ints)
-    #
-    # prompt style:
-    #   "full"  = lmms-eval canonical Shikra/KOSMOS-2 prompt, "[0,1] bounded"
-    #   "short" = trimmed, just the ask + caption (no format spec)
-    #   "nuwa"  = "Locate X ... JSON format." — Nuwa-paper Qwen prompt
-    #             (Gate-0.4 external evidence: Qwen2.5-VL 84% ACC@0.5 @ k=0.25
-    #              under this prompt; full → 0% in same harness)
-    #
-    # Env vars are the sole transport because lmms-eval loads task utils via
-    # importlib.spec_from_file_location, creating a separate module instance
-    # from the standard import path — process-level globals won't reach it.
-    MODEL_PRESETS = {
-        "llava":    {"bbox": "normalized", "prompt": "full"},
-        "qwen25vl": {"bbox": "pixel",      "prompt": "nuwa"},
-        "qwen3vl":  {"bbox": "scale_1000", "prompt": "nuwa"},
-        "qwen35":   {"bbox": "scale_1000", "prompt": "nuwa"},
-    }
-    preset = MODEL_PRESETS.get(model_family, {"bbox": "auto", "prompt": "full"})
-
-    # Override order for prompt_style AND bbox_format:
-    #   1. Shell env REFCOCO_PROMPT_STYLE / BBOX_COORD_FORMAT (A/B runs, verify scripts)
-    #   2. Hydra cfg.eval.prompt_style (per-experiment override; prompt only)
-    #   3. family default from MODEL_PRESETS
-    # bbox_format override added 2026-04-22 for verify_refcoco_root_cause.sh —
-    # without it, downstream env overrides get silently stomped by preset.
-    cfg_style = cfg.eval.get("prompt_style", None)
-    env_style = os.environ.get("REFCOCO_PROMPT_STYLE")
-    prompt_style = env_style or cfg_style or preset["prompt"]
-    prompt_source = "env" if env_style else ("cfg" if cfg_style else "default")
-
-    env_bbox = os.environ.get("BBOX_COORD_FORMAT")
-    bbox_format = env_bbox or preset["bbox"]
-    bbox_source = "env" if env_bbox else "default"
-
-    os.environ["BBOX_COORD_FORMAT"] = bbox_format
+    # Original LLaVA-1.5 RefCOCO prompt / bbox conventions.
+    prompt_style = (os.environ.get("REFCOCO_PROMPT_STYLE")
+                    or cfg.eval.get("prompt_style", None) or "full")
+    bbox_format = os.environ.get("BBOX_COORD_FORMAT") or "normalized"
     os.environ["REFCOCO_PROMPT_STYLE"] = prompt_style
-    logger.info(
-        f"RefCOCO preset (model_family={model_family}): "
-        f"bbox={bbox_format} (source={bbox_source}), "
-        f"prompt={prompt_style} (source={prompt_source})"
-    )
+    os.environ["BBOX_COORD_FORMAT"] = bbox_format
+    logger.info(f"RefCOCO preset: bbox={bbox_format}, prompt={prompt_style}")
 
     # Run evaluation
     tasks = list(cfg.eval.benchmarks)
