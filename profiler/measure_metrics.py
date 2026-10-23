@@ -39,7 +39,7 @@ def _build_model_and_apply_routing(cfg_path: Path):
     from omegaconf import OmegaConf
     from transformers import AutoProcessor
 
-    from models.router import FastVRouter, PDropRouter, QVERouter, SparseVLMRouter
+    from models.router import QVERouter
     from models.dispatcher import TokenDispatcher
     from models.patching import patch_model_for_routing
 
@@ -55,36 +55,17 @@ def _build_model_and_apply_routing(cfg_path: Path):
         _RELEASE_ROOT / "configs" / "model" / f"{model_name}.yaml"
     )
     pretrained = model_cfg.pretrained
-    lmms_type = model_cfg.get("lmms_model_type", "llava_hf")
-
-    if lmms_type == "llava_hf":
-        from transformers import LlavaForConditionalGeneration as ModelCls
-        model_family = "llava"
-    elif lmms_type == "qwen2_5_vl":
-        from transformers import Qwen2_5_VLForConditionalGeneration as ModelCls
-        model_family = "qwen25vl"
-    elif lmms_type in ("qwen3_vl", "qwen3vl"):
-        from transformers import Qwen3VLForConditionalGeneration as ModelCls
-        model_family = "qwen3vl"
-    else:
-        raise ValueError(f"Unknown lmms_model_type: {lmms_type}")
-
-    dtype = torch.float16 if model_family == "llava" else torch.bfloat16
-    print(
-        f"[PROFILER] loading {pretrained} "
-        f"(dtype={dtype}, family={model_family}) ...",
-        flush=True,
-    )
-
+    if model_cfg.get("lmms_model_type", "llava_hf") != "llava_hf":
+        raise ValueError("Only LLaVA-1.5 is supported.")
+    from transformers import LlavaForConditionalGeneration as ModelCls
+    model_family = "llava"
+    dtype = torch.float16
+    print(f"[CatchUp] loading {pretrained} (dtype={dtype})", flush=True)
     load_kwargs = dict(
         torch_dtype=dtype,
         attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
     )
-    if model_family == "llava":
-        model = ModelCls.from_pretrained(pretrained, **load_kwargs).to("cuda").eval()
-    else:
-        load_kwargs["device_map"] = "auto"
-        model = ModelCls.from_pretrained(pretrained, **load_kwargs).eval()
+    model = ModelCls.from_pretrained(pretrained, **load_kwargs).to("cuda").eval()
 
     proc_kwargs = {}
     if model_cfg.get("max_pixels"):
@@ -94,125 +75,22 @@ def _build_model_and_apply_routing(cfg_path: Path):
     # Keep this handle so the profiler can read LTC cache statistics after
     # each prefill without changing the normal model API.
     routing_ctx = None
+    routing_ctx = None
     r_cfg = cfg.routing
-
     if r_cfg.method == "none":
-        print("[PROFILER] no routing — vanilla baseline", flush=True)
-
-    elif r_cfg.method == "fastv":
-        router = FastVRouter(
-            scoring_layer=r_cfg.scoring_layer,
-            keep_ratio=r_cfg.keep_ratio,
-        )
-        routing_ctx = patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
-            model_family=model_family,
-        )
-        print(
-            f"[PROFILER] patched with FastV K={r_cfg.scoring_layer} "
-            f"keep={r_cfg.keep_ratio} action={r_cfg.action}",
-            flush=True,
-        )
-
-    elif r_cfg.method == "pdrop":
-        router = PDropRouter(
-            drop_layers=list(r_cfg.drop_layers),
-            keep_ratios=list(r_cfg.keep_ratios),
-            monotonic=r_cfg.get("monotonic", False),
-        )
-        routing_ctx = patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
-            model_family=model_family,
-        )
-        print(
-            f"[PROFILER] patched with PDrop drops={r_cfg.drop_layers} "
-            f"keeps={r_cfg.keep_ratios} action={r_cfg.action}",
-            flush=True,
-        )
-
-    elif r_cfg.method in ("qver", "query_dynamic"):
+        print("[profiler] dense LLaVA baseline", flush=True)
+    elif r_cfg.method == "qver":
         router = QVERouter(
             drop_layers=list(r_cfg.drop_layers),
             keep_ratios=list(r_cfg.keep_ratios),
             monotonic=r_cfg.get("monotonic", False),
         )
         routing_ctx = patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
+            model, router, TokenDispatcher(), action=r_cfg.action,
             model_family=model_family,
         )
-        print(
-            f"[PROFILER] patched with Q-VER "
-            f"drops={list(r_cfg.drop_layers)} "
-            f"keeps={list(r_cfg.keep_ratios)} "
-            f"monotonic={r_cfg.get('monotonic', False)} "
-            f"action={r_cfg.action}",
-            flush=True,
-        )
-
-    elif r_cfg.method == "sparsevlm":
-        router = SparseVLMRouter(
-            retain_tokens=int(r_cfg.get("retain_tokens", 192)),
-            use_version=str(r_cfg.get("use_version", "1_0")),
-            drop_layers=list(r_cfg.get("drop_layers", [2, 6, 15])),
-        )
-        routing_ctx = patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
-            model_family=model_family,
-        )
-        print(
-            f"[PROFILER] patched with SparseVLM "
-            f"retain_tokens={r_cfg.get('retain_tokens', 192)} "
-            f"use_version={r_cfg.get('use_version', '1_0')} "
-            f"drops={list(r_cfg.get('drop_layers', [2, 6, 15]))} "
-            f"action={r_cfg.action}",
-            flush=True,
-        )
-
-    elif r_cfg.method == "nuwa":
-        from models.nuwa_hf import NuwaRouter
-
-        router = NuwaRouter(
-            matain_token=int(r_cfg.get("matain_token", 192)),
-            distance=int(r_cfg.get("distance", 280)),
-            penalty_threshold_percentile=float(
-                r_cfg.get("penalty_threshold_percentile", 0.55)
-            ),
-            stage1_tokens=int(r_cfg.get("stage1_tokens", 336)),
-            stage2_layer=int(r_cfg.get("stage2_layer", 16)),
-            stage2_tokens=int(r_cfg.get("stage2_tokens", 48)),
-        )
-        routing_ctx = patch_model_for_routing(
-            model,
-            router,
-            TokenDispatcher(),
-            action=r_cfg.action,
-            model_family=model_family,
-        )
-        print(
-            f"[PROFILER] patched with Nuwa "
-            f"matain_token={r_cfg.get('matain_token', 192)} "
-            f"stage1={r_cfg.get('stage1_tokens', 336)} "
-            f"stage2_layer={r_cfg.get('stage2_layer', 16)} "
-            f"stage2={r_cfg.get('stage2_tokens', 48)} "
-            f"distance={r_cfg.get('distance', 280)} "
-            f"action={r_cfg.action}",
-            flush=True,
-        )
-
     else:
-        raise ValueError(f"Unknown routing.method: {r_cfg.method}")
+        raise ValueError(f"Unsupported routing method: {r_cfg.method}")
 
     model._routing_ctx = routing_ctx
     return model, processor

@@ -1,34 +1,30 @@
-# Generated output
+# Local data and generated outputs
 experiments/
 diagnostics/
 figures/
 submissions/
+logs*/
 outputs/
 wandb/
-logs/
 *.log
-
-# Python and environment
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .venv/
 venv/
+# Sensitive local credentials and configurations
 .env
 .env.*
 !.env.example
-
-# Data, weights, external editable evaluator
-lmms-eval/
-checkpoints/
-datasets/
-hf_cache/
-*.safetensors
+*.pem
+*.key
+# Large ML artifacts
 *.pt
 *.pth
-
-# Editor and OS
-.DS_Store
-.idea/
-.vscode/
+*.ckpt
+*.safetensors
+*.bin
+.cache/

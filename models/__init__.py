@@ -1,4 +1,4 @@
-from .router import TokenRouter, FastVRouter, PDropRouter, QVERouter, RoutingDecision
+from .router import TokenRouter, QVERouter, RoutingDecision
 from .dispatcher import TokenDispatcher, DispatchInfo
 from .patching import (
     patch_model_for_routing,
@@ -9,8 +9,6 @@ from .patching import (
 
 __all__ = [
     "TokenRouter",
-    "FastVRouter",
-    "PDropRouter",
     "QVERouter",
     "RoutingDecision",
     "TokenDispatcher",

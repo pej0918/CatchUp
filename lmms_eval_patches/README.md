@@ -1,33 +1,20 @@
-# lmms-eval patches for release reproduction
+# RefCOCO evaluation patches
 
-PyPI `lmms_eval==0.7.1` lacks two custom behaviors required to reproduce
-the paper's RefCOCO numbers across model families:
+The CatchUp LLaVA-1.5 reproduction uses the RefCOCO, RefCOCO+, and RefCOCOg evaluation utilities provided by `lmms-eval` **v0.7.1**. The three included patches preserve our inference-time bounding-box and prompt conventions.
 
-1. **`BBOX_COORD_FORMAT` env var** — controls how raw model output coords
-   are de-normalized:
-   - `normalized` — LLaVA-1.5 (already in `[0,1]`)
-   - `pixel`      — Qwen2.5-VL (smart-resize pixels)
-   - `scale_1000` — Qwen3-VL, Qwen3.5 (0-1000 scale)
+For the released LLaVA setup, the evaluation runner sets:
 
-2. **`REFCOCO_PROMPT_STYLE` env var** — controls user instruction:
-   - `full`  — lmms-eval canonical Shikra / KOSMOS-2 prompt
-   - `short` — trimmed
-   - `nuwa`  — Nuwa-paper Qwen prompt: `Locate X ... JSON format.`
+- `BBOX_COORD_FORMAT=normalized`: LLaVA outputs normalized `[0,1]` bounding-box coordinates.
+- `REFCOCO_PROMPT_STYLE=full`: use the original LLaVA/Shikra-style grounding instruction.
 
-Three task files need patching (refcoco / refcoco+ / refcocog all use the
-same env-var protocol):
+The patches also carry some upstream/research compatibility branches, but **this repository supports only LLaVA-1.5-7B**.
 
-```
-lmms_eval/tasks/refcoco/utils_rec.py
-lmms_eval/tasks/refcoco+/utils_rec.py
-lmms_eval/tasks/refcocog/utils_rec.py
-```
-
-## Apply
+After installing upstream `lmms-eval` in editable mode, run from the repository root:
 
 ```bash
-bash apply.sh    # picks up the installed lmms_eval site-packages path
+bash lmms_eval_patches/apply.sh
 ```
 
-The script is idempotent — re-running after patch is applied is a no-op
-(uses `patch --forward --quiet` which skips already-applied hunks).
+The helper finds the active Python installation of `lmms_eval` and skips previously patched files. If a patch cannot be applied, check that the upstream revision matches v0.7.1 rather than continuing with an unverified prompt/coordinate convention.
+
+The target files are `lmms_eval/tasks/refcoco/utils_rec.py`, `lmms_eval/tasks/refcoco+/utils_rec.py`, and `lmms_eval/tasks/refcocog/utils_rec.py`.

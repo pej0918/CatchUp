@@ -1,7 +1,7 @@
 # @package _global_
-# CatchUp on LLaVA-1.5-7B (routing budget 64).
-# Reversible visual evidence routing + LTC (run via scripts/run_catchup.sh).
-# "qver" is the historical implementation identifier, not the paper method name.
+# LLaVA-1.5-7B + Q-VER @ avg_T = 64.
+# Query-guided dynamic visual evidence routing with recoverable active/deferred
+# visual tokens. Use REROUTE_CORRECTION_MODE=qver for Query-Relevant LTC.
 defaults:
   - /eval: pope
   - /model: llava15_7b_hf
